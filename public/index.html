@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>cron-hq</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; line-height: 1.4; }
+    body { margin: 0; padding: 1rem; max-width: 90vw; margin-inline: auto; }
+    .banner {
+      background: #1e293b; color: #e2e8f0; padding: 0.75rem 1rem;
+      border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem;
+    }
+    .banner code { background: #334155; padding: 0.1em 0.35em; border-radius: 4px; }
+    .port-hint { background: #fef3c7; color: #78350f; padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 1rem; font-size: 0.85rem; }
+    h1 { font-size: 1.25rem; }
+    section { margin-bottom: 1.5rem; }
+    textarea { width: 100%; min-height: 220px; font-family: ui-monospace, monospace; font-size: 12px; box-sizing: border-box; }
+    table.log-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 0.5rem; }
+    table.log-table th, table.log-table td {
+      border: 1px solid #cbd5e1; padding: 0.35rem 0.5rem;
+      vertical-align: top; word-break: break-word; max-width: 14rem;
+    }
+    table.log-table th { background: #f1f5f9; text-align: left; }
+    table.log-table tbody tr.summary-row { cursor: pointer; }
+    table.log-table tbody tr.summary-row:hover { background: #f8fafc; }
+    table.log-table tbody tr.detail-row td { background: #f8fafc; padding: 0; }
+    table.log-table tbody tr.detail-row td .nested-wrap { padding: 0.5rem; overflow-x: auto; }
+    table.log-table.nested-table { margin: 0; }
+    table.log-table.nested-table th, table.log-table.nested-table td { font-size: 11px; max-width: 12rem; }
+    .muted { font-size: 0.85rem; color: #64748b; margin: 0.25rem 0; }
+    .toolbar { gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+    input[type="search"], select.ps { padding: 0.35rem 0.5rem; font-size: 12px; }
+    #pager.row { gap: 0.75rem; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
+    button { padding: 0.4rem 0.75rem; cursor: pointer; }
+    .status { font-size: 0.85rem; color: #64748b; }
+    .err { color: #b91c1c; }
+    .ok { color: #15803d; }
+  </style>
+</head>
+<body>
+  <h1>cron-hq dashboard</h1>
+
+  <div class="banner">
+    Saved job list writes to <code>settings.json</code> only.
+    If <code>SETTINGS</code> is set in <code>.env</code>, it replaces file config
+    <strong>only when the process starts</strong>. Scheduled log purge uses <code>LOG_PURGE_CRON</code> in <code>.env</code> only (not the dashboard).
+  </div>
+
+  <section>
+    <h2>Settings (JSON)</h2>
+    <p class="muted">JSON array of job objects. Use <strong>Save &amp; reload HQ</strong> to persist.</p>
+    <div class="row">
+      <button type="button" id="saveBtn">Save &amp; reload HQ</button>
+      <button type="button" id="copyEnvBtn">Copy SETTINGS (one line for .env)</button>
+      <span class="status" id="saveStatus"></span>
+    </div>
+    <textarea id="settingsJson" spellcheck="false"></textarea>
+  </section>
+
+  <section>
+    <h2>Logs</h2>
+    <div class="row">
+      <button type="button" id="clearBtn">Clear logs</button>
+      <span class="status" id="streamStatus">Connecting…</span>
+    </div>
+
+    <h3>By caller</h3>
+    <p class="muted">Click a row to expand the 3 most recent log lines for that job.</p>
+    <label class="muted" for="summarySearch">Filter summaries</label>
+    <div class="row toolbar">
+      <input type="search" id="summarySearch" placeholder="caller, url, cron, tag, status, message…" style="flex: 1; min-width: 12rem;" />
+    </div>
+    <table class="log-table">
+      <thead>
+        <tr>
+          <th>Caller</th>
+          <th>URL</th>
+          <th>Cron</th>
+          <th>Last tag</th>
+          <th>Latest status</th>
+          <th>Last timestamp</th>
+          <th>Last message</th>
+        </tr>
+      </thead>
+      <tbody id="summaryTbody"></tbody>
+    </table>
+
+    <h3 style="margin-top: 2rem;">All logs</h3>
+    <p class="muted">URLs are job-level (same for every row of that caller).</p>
+    <div class="row toolbar">
+      <input type="search" id="flatSearch" placeholder="message, tag, id, caller, url…" style="flex: 1; min-width: 12rem;" />
+      <label>Caller:
+        <select id="callerFilter" class="ps"><option value="">All</option></select>
+      </label>
+      <label>Per page:
+        <select id="pageSize" class="ps">
+          <option value="5">5</option>
+          <option value="10" selected>10</option>
+          <option value="15">15</option>
+        </select>
+      </label>
+    </div>
+    <table class="log-table">
+      <thead>
+        <tr>
+          <th>Caller</th>
+          <th>ID</th>
+          <th>Timestamp</th>
+          <th>Tag</th>
+          <th>Data</th>
+          <th>Message</th>
+          <th>URL</th>
+        </tr>
+      </thead>
+      <tbody id="flatTbody"></tbody>
+    </table>
+    <div class="row" id="pager">
+      <button type="button" id="flatPrev">Previous</button>
+      <button type="button" id="flatNext">Next</button>
+      <span class="status" id="flatPageMeta"></span>
+    </div>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/moment@2.30.1/moment.min.js"></script>
+  <script src="/client.js"></script>
+</body>
+</html>
