@@ -1,4 +1,76 @@
 (function () {
+  const STORAGE_KEY = "cron_hq_x_api_key";
+
+  /** @param {Record<string, string>=} extraHeaders */
+  function authFetchHeaders(extraHeaders) {
+    const h = {
+      Accept: "application/json",
+      ...(extraHeaders || {}),
+    };
+    const k = sessionStorage.getItem(STORAGE_KEY);
+    if (k) h["x-api-key"] = k;
+    return h;
+  }
+
+  async function fetchPing() {
+    const r = await fetch("/api/ping", { cache: "no-store" });
+    if (!r.ok) throw new Error("ping failed: " + r.status);
+    return r.json();
+  }
+
+  async function ensureAuthenticated() {
+    const ping = await fetchPing();
+    if (!ping.authRequired) return;
+
+    while (true) {
+      let key = sessionStorage.getItem(STORAGE_KEY);
+      if (!key) {
+        const entered = window.prompt(
+          "Enter API key (must match server API_KEY env):"
+        );
+        if (entered === null) {
+          document.body.innerHTML =
+            '<p style="font-family:system-ui;padding:2rem">Access cancelled.</p>';
+          throw new Error("cancelled");
+        }
+        key = entered.trim();
+        if (!key) {
+          window.alert("API key cannot be empty.");
+          continue;
+        }
+        sessionStorage.setItem(STORAGE_KEY, key);
+      }
+      const r = await fetch("/api", {
+        cache: "no-store",
+        headers: authFetchHeaders(),
+      });
+      if (r.ok) return;
+      sessionStorage.removeItem(STORAGE_KEY);
+      window.alert("Invalid API key.");
+    }
+  }
+
+  /**
+   * @param {string} url
+   * @param {RequestInit=} options
+   */
+  async function apiFetch(url, options) {
+    const opts = options || {};
+    const merged = {
+      ...opts,
+      headers: authFetchHeaders(opts.headers || {}),
+    };
+    let r = await fetch(url, merged);
+    if (r.status !== 401) return r;
+    sessionStorage.removeItem(STORAGE_KEY);
+    window.alert("Unauthorized — enter API key again.");
+    await ensureAuthenticated();
+    return fetch(url, {
+      ...opts,
+      headers: authFetchHeaders(opts.headers || {}),
+    });
+  }
+
   /** @global moment loaded from CDN (index.html) */
   /** @returns {string} */
   function formatDisplayTs(raw) {
@@ -38,9 +110,8 @@
 
   async function refreshCallerMeta() {
     try {
-      const r = await fetch("/api/callers/informations", {
+      const r = await apiFetch("/api/callers/informations", {
         cache: "no-store",
-        headers: { Accept: "application/json" },
       });
       if (!r.ok) return;
       const arr = await r.json();
@@ -96,6 +167,7 @@
       caller: s.jobs ?? "",
       url: s.url ?? "",
       cron: s.cron ?? "",
+      nextRunAt: null,
       lastTag: null,
       latestStatus: null,
       lastTimestamp: null,
@@ -127,7 +199,11 @@
             ? r.caller
             : r.name ?? "",
       }));
-      return { summaries: parsed.summaries, flat: flatRaw };
+      const summaries = parsed.summaries.map((s) => ({
+        ...s,
+        nextRunAt: s.nextRunAt != null ? s.nextRunAt : null,
+      }));
+      return { summaries, flat: flatRaw };
     }
 
     const groupedKeys = Object.keys(parsed).filter(
@@ -180,6 +256,7 @@
         caller,
         url: mu.url ?? "",
         cron: mu.cron ?? "",
+        nextRunAt: null,
         lastTag: last ? last.tag : null,
         latestStatus: last ? last.status : null,
         lastTimestamp: last ? last.timestamp : null,
@@ -214,6 +291,8 @@
       s.lastTimestamp,
       formatDisplayTs(s.lastTimestamp),
       s.lastMessage,
+      s.nextRunAt,
+      formatDisplayTs(s.nextRunAt),
     ]
       .map((x) => (x == null ? "" : String(x)))
       .join(" ")
@@ -285,6 +364,47 @@
         td.textContent = text;
         sumTr.appendChild(td);
       });
+
+      const nextTd = document.createElement("td");
+      nextTd.textContent =
+        s.nextRunAt != null && String(s.nextRunAt) !== ""
+          ? formatDisplayTs(s.nextRunAt)
+          : "—";
+      sumTr.appendChild(nextTd);
+
+      const runTd = document.createElement("td");
+      const runBtn = document.createElement("button");
+      runBtn.type = "button";
+      runBtn.textContent = "Run";
+      runBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const name = s.caller;
+        const ok = window.confirm(
+          'Trigger job "' +
+            name +
+            '" now? Will hit configured URL immediately (same as cron).'
+        );
+        if (!ok) return;
+        apiFetch("/api/callers/" + encodeURIComponent(name) + "/trigger", {
+          method: "POST",
+        })
+          .then(async (r) => {
+            const body = await r.json().catch(() => ({}));
+            if (r.ok) window.alert("Triggered: " + name);
+            else
+              window.alert(
+                body.error != null && String(body.error) !== ""
+                  ? String(body.error)
+                  : r.statusText || "Request failed"
+              );
+          })
+          .catch((err) =>
+            window.alert(err != null && err.message ? err.message : String(err))
+          );
+      });
+      runTd.appendChild(runBtn);
+      sumTr.appendChild(runTd);
+
       sumTr.addEventListener("click", () => {
         if (expandedCallers.has(s.caller)) expandedCallers.delete(s.caller);
         else expandedCallers.add(s.caller);
@@ -296,7 +416,7 @@
         const detTr = document.createElement("tr");
         detTr.className = "detail-row";
         const td = document.createElement("td");
-        td.colSpan = 7;
+        td.colSpan = 9;
         const wrap = document.createElement("div");
         wrap.className = "nested-wrap";
         wrap.addEventListener("click", (e) => e.stopPropagation());
@@ -346,14 +466,14 @@
     if (!filtered.length && lastPayload.summaries.length === 0) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 7;
+      td.colSpan = 9;
       td.textContent = "No jobs configured.";
       tr.appendChild(td);
       summaryTbody.appendChild(tr);
     } else if (!filtered.length) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 7;
+      td.colSpan = 9;
       td.textContent = "No rows match summary filter.";
       tr.appendChild(td);
       summaryTbody.appendChild(tr);
@@ -483,9 +603,8 @@
 
   async function fetchLogsPoll() {
     try {
-      const r = await fetch("/api/logs", {
+      const r = await apiFetch("/api/logs", {
         cache: "no-store",
-        headers: { Accept: "application/json" },
       });
       if (!r.ok) throw new Error(r.status + " " + r.statusText);
       applyDashboardInbound(await r.json());
@@ -507,34 +626,99 @@
     }
   }
 
-  let es = null;
+  let sseAbortController = null;
+
+  function stopSSE() {
+    if (sseAbortController) {
+      sseAbortController.abort();
+      sseAbortController = null;
+    }
+  }
+
+  async function handleUnauthorized() {
+    sessionStorage.removeItem(STORAGE_KEY);
+    stopSSE();
+    stopPoll();
+    window.alert("Unauthorized — enter API key again.");
+    await ensureAuthenticated();
+    await refreshCallerMeta();
+    await fetchLogsPoll();
+    connectSSE();
+  }
 
   function connectSSE() {
-    if (es) {
-      try {
-        es.close();
-      } catch (_) {}
-      es = null;
-    }
+    stopSSE();
+    const ac = new AbortController();
+    sseAbortController = ac;
 
-    es = new EventSource("/api/events");
-
-    function sseIngest(ev) {
+    function sseIngestData(dataStr) {
       stopPoll();
       setStreamStatus("Live (SSE)", false);
       try {
-        applyDashboardInbound(parseSseJsonString(ev.data));
+        applyDashboardInbound(parseSseJsonString(dataStr));
       } catch (e) {
         setStreamStatus("Bad SSE payload: " + e.message, true);
       }
     }
 
-    es.addEventListener("logs", sseIngest);
-    es.addEventListener("message", sseIngest);
+    (async function runSse() {
+      try {
+        const r = await fetch("/api/events", {
+          cache: "no-store",
+          headers: authFetchHeaders({
+            Accept: "text/event-stream",
+          }),
+          signal: ac.signal,
+        });
 
-    es.onerror = () => {
-      es.close();
-      es = null;
+        if (r.status === 401) {
+          stopSSE();
+          handleUnauthorized();
+          return;
+        }
+
+        if (!r.ok || !r.body) {
+          throw new Error(r.status + " " + r.statusText);
+        }
+
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let sepIdx;
+          while ((sepIdx = buffer.indexOf("\n\n")) >= 0) {
+            const block = buffer.slice(0, sepIdx);
+            buffer = buffer.slice(sepIdx + 2);
+            let eventName = "message";
+            const dataLines = [];
+            const lines = block.split(/\r?\n/);
+            for (const line of lines) {
+              if (line.startsWith("event:"))
+                eventName = line.slice(6).trim();
+              else if (line.startsWith("data:"))
+                dataLines.push(line.slice(5).replace(/^\s/, ""));
+            }
+            if (
+              dataLines.length &&
+              (eventName === "logs" || eventName === "message")
+            ) {
+              sseIngestData(dataLines.join("\n"));
+            }
+          }
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        setStreamStatus(
+          "SSE error: " + (e && e.message ? e.message : String(e)),
+          true
+        );
+      }
+
+      stopSSE();
       startPoll();
       if (sseRetryTimer) clearTimeout(sseRetryTimer);
       sseRetryTimer = setTimeout(() => {
@@ -542,11 +726,11 @@
         stopPoll();
         connectSSE();
       }, 3000);
-    };
+    })();
   }
 
   async function loadSettings() {
-    const r = await fetch("/api/settings", { cache: "no-store" });
+    const r = await apiFetch("/api/settings", { cache: "no-store" });
     if (!r.ok) throw new Error(r.status + " " + r.statusText);
     const data = await r.json();
     const rows = jobsFromParsed(data);
@@ -618,7 +802,7 @@
       return;
     }
     try {
-      const r = await fetch("/api/settings", {
+      const r = await apiFetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(rows),
@@ -642,7 +826,7 @@
 
   clearBtn.addEventListener("click", async () => {
     try {
-      const r = await fetch("/api/logs/clear", { method: "POST" });
+      const r = await apiFetch("/api/logs/clear", { method: "POST" });
       if (!r.ok && r.status !== 204) throw new Error(r.statusText);
       await refreshCallerMeta();
       await fetchLogsPoll();
@@ -651,12 +835,25 @@
     }
   });
 
-  const settingsLoad = loadSettings().catch((e) => {
-    saveStatus.textContent = "Load settings failed: " + e.message;
-    saveStatus.className = "status err";
-  });
+  async function boot() {
+    try {
+      await ensureAuthenticated();
+      await Promise.all([
+        refreshCallerMeta(),
+        loadSettings().catch((e) => {
+          saveStatus.textContent = "Load settings failed: " + e.message;
+          saveStatus.className = "status err";
+        }),
+      ]);
+      await fetchLogsPoll();
+      connectSSE();
+    } catch (e) {
+      if (e && e.message === "cancelled") return;
+      saveStatus.textContent =
+        "Startup failed: " + (e && e.message ? e.message : String(e));
+      saveStatus.className = "status err";
+    }
+  }
 
-  Promise.all([refreshCallerMeta(), settingsLoad])
-    .then(() => fetchLogsPoll())
-    .then(() => connectSSE());
+  boot();
 })();

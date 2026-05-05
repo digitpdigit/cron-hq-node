@@ -41,21 +41,22 @@ class HQ {
     constructor({ settings, debug }) {
         this.settings = settings;
         this.caller = [];
-        this.tasks = [];
+        /** @type {{ name: string, caller: import("./caller"), task: { stop: Function, getNextRun?: Function } }[]} */
+        this.scheduledJobs = [];
         this.logPurgeCron = effectiveLogPurgeCronFromEnv();
         this.logPurgeTask = null;
         this.debug = debug;
     }
 
     stopScheduledTasks() {
-        for (const task of this.tasks) {
+        for (const row of this.scheduledJobs) {
             try {
-                task.stop();
+                row.task.stop();
             } catch (_) {
                 /* ignore */
             }
         }
-        this.tasks = [];
+        this.scheduledJobs = [];
     }
 
     stopLogPurgeTask() {
@@ -91,8 +92,44 @@ class HQ {
             const task = cron.schedule(setting.cron, () => {
                 caller.call();
             });
-            this.tasks.push(task);
+            this.scheduledJobs.push({
+                name: setting.jobs,
+                caller,
+                task,
+            });
         }
+    }
+
+    /**
+     * @returns {Record<string, string|null>} job name → next scheduled run ISO, or null
+     */
+    nextRunAtByCallerName() {
+        const out = {};
+        for (const row of this.scheduledJobs) {
+            try {
+                const fn = row.task && row.task.getNextRun;
+                const d =
+                    typeof fn === "function" ? fn.call(row.task) : null;
+                out[row.name] =
+                    d instanceof Date && !Number.isNaN(d.getTime())
+                        ? d.toISOString()
+                        : null;
+            } catch (_) {
+                out[row.name] = null;
+            }
+        }
+        return out;
+    }
+
+    /** @param {string} name job name (`setting.jobs`) */
+    triggerCaller(name) {
+        const row = this.scheduledJobs.find((s) => s.name === name);
+        if (!row) {
+            const err = new Error(`Unknown caller: ${name}`);
+            err.code = "UNKNOWN_CALLER";
+            throw err;
+        }
+        row.caller.call();
     }
 
     _mountLogPurgeScheduler() {
